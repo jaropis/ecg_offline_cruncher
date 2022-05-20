@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+lib*/
+*~
+.vscode/
+share/
+bin/
+AVA02_*
+*csv
+*json
+*asv
+.idea/
+cruncher.tar.gz
