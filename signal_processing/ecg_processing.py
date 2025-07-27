@@ -1,9 +1,75 @@
 # import peakutils- t be reused
 import warnings
 import numpy as np
+import numba as nb
 from mne.preprocessing import ecg
-
+from time import time
 old_err = np.seterr(divide='raise')
+
+
+@nb.jit(nopython=True)
+def correlation_numba(x, y):
+    """
+    Manual correlation implementation for Numba compatibility
+    Equivalent to np.corrcoef(x, y)[0, 1] but faster and Numba-compatible
+    """
+    n = len(x)
+    if n == 0 or len(y) == 0:
+        return 0.0
+    
+    # Check for NaN or infinite values
+    has_nan_x = False
+    has_nan_y = False
+    for i in range(n):
+        if not np.isfinite(x[i]):
+            has_nan_x = True
+            break
+    for i in range(len(y)):
+        if not np.isfinite(y[i]):
+            has_nan_y = True
+            break
+    
+    if has_nan_x or has_nan_y:
+        return 0.0
+    
+    mean_x = np.mean(x)
+    mean_y = np.mean(y)
+    
+    # Calculate numerator and denominator
+    num = 0.0
+    sum_sq_x = 0.0
+    sum_sq_y = 0.0
+    
+    for i in range(n):
+        dx = x[i] - mean_x
+        dy = y[i] - mean_y
+        num += dx * dy
+        sum_sq_x += dx * dx
+        sum_sq_y += dy * dy
+    
+    den = np.sqrt(sum_sq_x * sum_sq_y)
+    
+    if den == 0.0 or not np.isfinite(den):
+        return 0.0
+    
+    result = num / den
+    if not np.isfinite(result):
+        return 0.0
+        
+    return result
+
+
+@nb.jit(nopython=True)
+def find_max_qrs_numba(qrs_pos, ecg_line, dist=100):
+    """Numba-optimized version of find_max_qrs"""
+    if qrs_pos - dist > 0:
+        start_idx = qrs_pos - dist
+        end_idx = qrs_pos + dist
+        segment = ecg_line[start_idx:end_idx]
+        return np.argmax(segment) + start_idx
+    else:
+        segment = ecg_line[:qrs_pos + dist]
+        return np.argmax(segment)
 
 
 def find_max_qrs(qrs_pos, ecg_line, dist = 100):
@@ -11,6 +77,66 @@ def find_max_qrs(qrs_pos, ecg_line, dist = 100):
         return np.argmax(ecg_line[qrs_pos - dist: qrs_pos + dist]) + (qrs_pos - dist)
     else:
         return np.argmax(ecg_line[: qrs_pos + dist])
+
+
+@nb.jit(nopython=True)
+def clean_peaks_numba(qrs_complexes, dist=20):
+    """
+    Numba-optimized version of clean_peaks
+    Note: Uses pre-allocated arrays instead of dynamic lists
+    """
+    n = len(qrs_complexes)
+    if n <= 1:
+        return qrs_complexes.copy()
+    
+    # Pre-allocate arrays (worst case: no peaks are merged)
+    new_peaks = np.zeros(n, dtype=qrs_complexes.dtype)
+    accumulator = np.zeros(n, dtype=qrs_complexes.dtype)
+    new_peaks_idx = 0
+    accumulator_size = 0
+    push = True
+    
+    for idx in range(n - 1):
+        if qrs_complexes[idx + 1] - qrs_complexes[idx] < dist:
+            accumulator[accumulator_size] = qrs_complexes[idx]
+            accumulator_size += 1
+            push = False
+        elif not push:  # this will be the last of close-by qrs complexes
+            accumulator[accumulator_size] = qrs_complexes[idx]
+            accumulator_size += 1
+            # Calculate median manually for Numba compatibility
+            if accumulator_size > 0:
+                acc_segment = accumulator[:accumulator_size]
+                acc_sorted = np.sort(acc_segment)
+                if accumulator_size % 2 == 1:
+                    median_val = acc_sorted[accumulator_size // 2]
+                else:
+                    median_val = (acc_sorted[accumulator_size // 2 - 1] + acc_sorted[accumulator_size // 2]) / 2
+                new_peaks[new_peaks_idx] = int(median_val)
+                new_peaks_idx += 1
+            push = True
+            accumulator_size = 0
+        else:
+            new_peaks[new_peaks_idx] = qrs_complexes[idx]
+            new_peaks_idx += 1
+    
+    # Handle the last qrs
+    if accumulator_size == 0:
+        new_peaks[new_peaks_idx] = qrs_complexes[n - 1]
+        new_peaks_idx += 1
+    else:
+        accumulator[accumulator_size] = qrs_complexes[n - 1]
+        accumulator_size += 1
+        acc_segment = accumulator[:accumulator_size]
+        acc_sorted = np.sort(acc_segment)
+        if accumulator_size % 2 == 1:
+            median_val = acc_sorted[accumulator_size // 2]
+        else:
+            median_val = (acc_sorted[accumulator_size // 2 - 1] + acc_sorted[accumulator_size // 2]) / 2
+        new_peaks[new_peaks_idx] = int(median_val)
+        new_peaks_idx += 1
+    
+    return new_peaks[:new_peaks_idx]
 
 
 def clean_peaks(qrs_complexes, dist=20):
@@ -90,16 +216,33 @@ def get_template(qrs_voltage, qrs_position, template_length=101, n_sample=8, hi_
     # plt.show()
     return template
 
+@nb.jit(nopython=True)
+def correlation_machine_numba(vector, template):
+    """
+    Numba-optimized version of correlation_machine
+    This should be MUCH faster than the original version
+    """
+    extended_vector = np.zeros(len(vector) + len(template))
+    extended_vector[:len(vector)] = vector
+    rolling_correlations = np.zeros(len(vector))
+    
+    for idx in range(len(vector)):
+        segment = extended_vector[idx:idx+len(template)]
+        rolling_correlations[idx] = correlation_numba(template, segment)
+    
+    return rolling_correlations
 
 def correlation_machine(vector, template):
-    extended_vector = np.concatenate([vector, template * 0])
+    extended_vector = np.zeros(len(vector) + len(template))
+    extended_vector[:len(vector)] = vector
     rolling_correlations = []
     for idx in range(0, len(vector)):
         # h..jowo zaimplementowana korelacja w corrcoef
-        try:
-            rolling_correlations.append(np.corrcoef(template, extended_vector[idx:idx+len(template)])[0, 1])
-        except FloatingPointError as e:
-            rolling_correlations.append(0)
+        # try:
+        #     rolling_correlations.append(np.corrcoef(template, extended_vector[idx:idx+len(template)])[0, 1])
+        # except FloatingPointError as e:
+        #     rolling_correlations.append(0)
+        rolling_correlations.append(np.corrcoef(template, extended_vector[idx:idx+len(template)])[0, 1])
     return np.array(rolling_correlations)
 
 
@@ -122,21 +265,195 @@ def find_correlated_peaks(correlations_vector, voltage, template, threshold=0.75
     indices = np.nonzero(boo[1:] != boo[:-1])[0] + 1  # finding indices of segments with only True or only False
     index_vector = np.arange(len(correlations_vector))
     regions = np.split(index_vector, indices)  # splitting correlations into true/false regions on threshold condition
-    regions_over_thr = np.array(regions[0::2] if boo[0] else regions[1::2])  # selecting only "true" regions
-    regions_over_thr += int(np.floor(template_length/2) + 1)  # moving half a template
+    
+    # Fix: Handle regions as a list instead of trying to create a homogeneous numpy array
+    if len(regions) > 0:
+        regions_over_thr = regions[0::2] if boo[0] else regions[1::2]  # selecting only "true" regions
+    else:
+        regions_over_thr = []
+    
     peaks = []
     # segment holds actual indices, not values - see above
     for segment in regions_over_thr:
+        if len(segment) == 0:
+            continue
+        segment_shifted = segment + int(np.floor(template_length/2) + 1)  # moving half a template
         extended_segment = np.concatenate(
-            [np.arange(segment[0] - search_width, segment[0]), segment, np.arange(segment[-1] + 1, segment[-1] + search_width + 1)]
+            [np.arange(segment_shifted[0] - search_width, segment_shifted[0]), 
+             segment_shifted, 
+             np.arange(segment_shifted[-1] + 1, segment_shifted[-1] + search_width + 1)]
         )
-        peak_position = np.argmax(voltage[extended_segment]) + segment[0] - search_width
+        # Ensure indices are within bounds
+        extended_segment = extended_segment[(extended_segment >= 0) & (extended_segment < len(voltage))]
+        if len(extended_segment) == 0:
+            continue
+            
+        peak_position = np.argmax(voltage[extended_segment]) + extended_segment[0]
         # now I check whether the shape is not to low or too large
         if np.isnan(np.ptp(voltage[extended_segment])):
             print(voltage[extended_segment], segment)
         if 1/2*template_ptp < np.ptp(voltage[extended_segment]) < 2 * template_ptp:
             peaks.append(peak_position)
     return np.array(peaks)  # + int(np.floor(template_length/2) + 1)
+
+
+@nb.jit(nopython=True)
+def find_correlated_peaks_numba(correlations_vector, voltage, template, threshold=0.75, search_width=10):
+    """
+    Numba-optimized version of find_correlated_peaks
+    This version manually implements the region detection and peak finding logic
+    """
+    template_length = len(template)
+    template_ptp = np.ptp(template)
+    
+    # Find regions above threshold
+    above_threshold = correlations_vector >= threshold
+    peaks = []
+    
+    i = 0
+    while i < len(above_threshold):
+        if above_threshold[i]:
+            # Found start of a region above threshold
+            region_start = i
+            # Find end of region
+            while i < len(above_threshold) and above_threshold[i]:
+                i += 1
+            region_end = i - 1
+            
+            # Process this region
+            if region_end >= region_start:
+                # Shift by half template length
+                shift = int(np.floor(template_length/2) + 1)
+                segment_start = region_start + shift
+                segment_end = region_end + shift
+                
+                # Create extended search region
+                search_start = max(0, segment_start - search_width)
+                search_end = min(len(voltage) - 1, segment_end + search_width)
+                
+                if search_end > search_start:
+                    # Find maximum in the extended region
+                    max_val = voltage[search_start]
+                    peak_position = search_start
+                    
+                    for j in range(search_start + 1, search_end + 1):
+                        if voltage[j] > max_val:
+                            max_val = voltage[j]
+                            peak_position = j
+                    
+                    # Check if peak amplitude is reasonable
+                    region_min = voltage[search_start]
+                    region_max = voltage[search_start]
+                    for j in range(search_start, search_end + 1):
+                        if voltage[j] < region_min:
+                            region_min = voltage[j]
+                        if voltage[j] > region_max:
+                            region_max = voltage[j]
+                    
+                    region_ptp = region_max - region_min
+                    
+                    if not np.isnan(region_ptp) and template_ptp/2 < region_ptp < 2 * template_ptp:
+                        peaks.append(peak_position)
+        else:
+            i += 1
+    
+    return np.array(peaks)
+
+
+def find_correlated_peaks(correlations_vector, voltage, template, threshold=0.75, search_width=10):
+    """
+    function to actually look for peaks in the result of correlation machine - maxima ideally correspond to
+    QRSs
+    :param correlations_vector: the vector resulting from correlation machine between template and ECG
+    :param voltage: actual ECG
+    :param template: self explanatory
+    :param threshold: what "similar" means - 0.85 means that correlation betwwen template and ECG segment is high enough
+    for QRS to be identified
+    :param search_width: how wide should the search be around the correlated maximum - the values in
+    correlation_vectors drop rapidly at QRS's, within 2-3 samples, so the search within actual ECG is widened
+    :return: the peaks identified by this correlate - locate - maximum procedure
+    """
+    template_length = len(template)
+    template_ptp = np.ptp(template)
+    boo = np.array(correlations_vector >= threshold)  # finding indices which are over the threshold
+    indices = np.nonzero(boo[1:] != boo[:-1])[0] + 1  # finding indices of segments with only True or only False
+    index_vector = np.arange(len(correlations_vector))
+    regions = np.split(index_vector, indices)  # splitting correlations into true/false regions on threshold condition
+    
+    # Fix: Handle regions as a list instead of trying to create a homogeneous numpy array
+    if len(regions) > 0:
+        regions_over_thr = regions[0::2] if boo[0] else regions[1::2]  # selecting only "true" regions
+    else:
+        regions_over_thr = []
+    
+    peaks = []
+    # segment holds actual indices, not values - see above
+    for segment in regions_over_thr:
+        if len(segment) == 0:
+            continue
+        segment_shifted = segment + int(np.floor(template_length/2) + 1)  # moving half a template
+        extended_segment = np.concatenate(
+            [np.arange(segment_shifted[0] - search_width, segment_shifted[0]), 
+             segment_shifted, 
+             np.arange(segment_shifted[-1] + 1, segment_shifted[-1] + search_width + 1)]
+        )
+        # Ensure indices are within bounds
+        extended_segment = extended_segment[(extended_segment >= 0) & (extended_segment < len(voltage))]
+        if len(extended_segment) == 0:
+            continue
+            
+        peak_position = np.argmax(voltage[extended_segment]) + extended_segment[0]
+        # now I check whether the shape is not to low or too large
+        if np.isnan(np.ptp(voltage[extended_segment])):
+            print(voltage[extended_segment], segment)
+        if 1/2*template_ptp < np.ptp(voltage[extended_segment]) < 2 * template_ptp:
+            peaks.append(peak_position)
+    return np.array(peaks)  # + int(np.floor(template_length/2) + 1)
+
+
+def find_correlated_peaks_wrapper(correlations_vector, voltage, template, threshold=0.75, search_width=10, use_numba=True):
+    """
+    Wrapper function that can switch between original and Numba implementations
+    """
+    if use_numba:
+        return find_correlated_peaks_numba(correlations_vector, voltage, template, threshold, search_width)
+    else:
+        return find_correlated_peaks(correlations_vector, voltage, template, threshold, search_width)
+
+
+@nb.jit(nopython=True)
+def noise_numba(r_waves, time_track, signal, half_template_length=50):
+    """
+    Numba-optimized version of noise calculation
+    :param r_waves: R-wave positions in time
+    :param time_track: time array
+    :param signal: ECG signal
+    :param half_template_length: half template length
+    :return: noise levels between R-waves
+    """
+    rr_noise = np.zeros(len(r_waves) - 1)
+    
+    for idx in range(1, len(r_waves)):
+        # Find peak positions in the signal array
+        peak_position = -1
+        prev_peak_position = -1
+        
+        # Manual search for positions (since np.where doesn't work well in numba)
+        for i in range(len(time_track)):
+            if time_track[i] >= r_waves[idx] and peak_position == -1:
+                peak_position = i
+            if time_track[i] >= r_waves[idx - 1] and prev_peak_position == -1:
+                prev_peak_position = i
+        
+        if peak_position > prev_peak_position + 2 * half_template_length:
+            start_idx = prev_peak_position + half_template_length
+            end_idx = peak_position - half_template_length
+            sig_segment = signal[start_idx:end_idx]
+            rr_noise[idx - 1] = np.std(sig_segment)
+        else:
+            rr_noise[idx - 1] = 0.0
+    
+    return rr_noise
 
 
 def detect_r_waves(time_track, voltage, frequency=200):
@@ -164,13 +481,23 @@ def detect_r_waves(time_track, voltage, frequency=200):
     # adding 'start' here to keep track of the time
     global_peaks = ecg.qrs_detector(frequency, ecg=voltage, thresh_value=0.3,
                                     h_freq=99, l_freq=1, filter_length=200 * 3)
-    global_peaks = np.array([find_max_qrs(_, voltage) for _ in global_peaks])
-    global_peaks = clean_peaks(global_peaks)
+    global_peaks = np.array([find_max_qrs_numba(_, voltage) for _ in global_peaks])
+    global_peaks = clean_peaks_numba(global_peaks)
     template = get_template(voltage, global_peaks, template_length=int(frequency / 4 + 1))
-    if template == np.array([-1]):
+    if len(template) == 1 and template[0] == -1:
         return np.transpose(np.array([np.array([]), np.array([])]))
-    correlations = correlation_machine(voltage, template)
-    global_peaks = find_correlated_peaks(correlations, voltage=voltage, template=template)
+    start_time = time()    
+    correlations = correlation_machine_numba(voltage, template)
+    correlation_time = time() - start_time
+    print(f"Numba correlation time: {correlation_time:.4f} seconds")
+    
+    # Test both implementations for comparison
+    peak_start_time = time()
+    global_peaks = find_correlated_peaks_numba(correlations, voltage=voltage, template=template)
+    numba_peak_time = time() - peak_start_time
+    
+    print(f"Numba peak detection time: {numba_peak_time:.4f} seconds")
+    print(f"Total Numba processing time: {correlation_time + numba_peak_time:.4f} seconds")
     peaks_values = [voltage[i] for i in global_peaks]
     peaks_positions = [time_track[i] for i in global_peaks]
     return np.transpose(np.array([np.array(peaks_positions), np.array(peaks_values)]))
@@ -244,14 +571,8 @@ def noise(r_waves, time_track, signal, half_template_length=50):
     :param half_template_length:
     :return:
     """
-    rr_noise = [] # this list holds the resulting noise
-    for idx in range(1, len(r_waves)):
-        peak_position = np.where(time_track >= r_waves[idx])[0][0]
-        prev_peak_position = np.where(time_track >= r_waves[idx - 1])[0][0]
-        sig_segment = signal[prev_peak_position + half_template_length:peak_position - half_template_length]
-        noise_level = np.std(sig_segment)
-        rr_noise.append(noise_level)
-    return rr_noise
+    # Use Numba version for better performance
+    return noise_numba(r_waves, time_track, signal, half_template_length).tolist()
 
 
 def detect_artifacts(r_waves_positions, time_track, signal, rr_filter=(0.3, 1.75)):

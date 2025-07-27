@@ -2,10 +2,9 @@ import numpy as np
 import pandas as pd
 import json
 from datetime import datetime
-from . signal_processing.ecg_processing import detect_r_waves, detect_artifacts, detect_supraventriculars, \
-                                               detect_ventriculars
+from signal_processing.ecg_processing import detect_r_waves, detect_artifacts, detect_supraventriculars, detect_ventriculars
 # Now loading the HRA modules
-from . HRAExplorer.signal_properties.RRclasses import RRSignal
+from HRAExplorer.signal_properties.RRclasses import RRSignal
 
 
 class Signal:
@@ -82,13 +81,28 @@ class ECG(Signal):
 
     def calculate_results(self):
         # unpacking a numpy array below
+        print("detection of R-waves started")
         self.r_waves_all_pos, self.r_waves_all_vals = detect_r_waves(self.time_track, self.signal_values).T
+        print("R-waves detected")
+        print("annotating R-waves")
         self.annotations = self.annotate_r_waves()
+        print("R-waves annotated")
+        print("detecting ventriculars")
         self.ventriculars_pos, self.ventriculars_vals = self.get_ventriculars()
+        print("Ventriculars detected")
+        print("detecting supraventriculars")
         self.supraventriculars_pos, self.supraventriculars_vals = self.get_supraventriculars()
+        print("Supraventriculars detected")
+        print("detecting artifacts")
         self.artifacts_pos, self.artifacts_vals = self.get_artifacts()
+        print("Artifacts detected")
+        print("getting RR intervals")
         self.rr_intervals, self.rr_annotations = self.get_rrs()
+        print("RR intervals obtained")
+        print("updating Poincare plot")
         self.update_poincare()
+        print("Poincare plot updated")
+        print("updating results dictionary")
         self.update_results_dict()
 
     def get_preprocessed_data(self, data_file):
@@ -175,8 +189,11 @@ class ECG(Signal):
         output: annotates the RR intervals
         '''
         annotations = np.zeros_like(self.r_waves_all_pos)
+        print("Detecting artifacts")
         artifacts = self.detect_artifacts()
+        print("Detecting supraventriculars")
         supraventriculars = self.detect_supraventriculars()
+        print("Detecting ventriculars")
         ventriculars = self.detect_ventriculars()
         if len(supraventriculars) > 0:
             annotations[supraventriculars] = 2
@@ -187,19 +204,19 @@ class ECG(Signal):
         return annotations
 
     def detect_artifacts(self):
-        if self.r_waves_all_pos:
+        if self.r_waves_all_pos is not None and len(self.r_waves_all_pos) > 0:
             return detect_artifacts(self.r_waves_all_pos, self.time_track, self.signal_values)
         else:
             return np.array([])
 
     def detect_supraventriculars(self):
-        if self.r_waves_all_pos:
+        if self.r_waves_all_pos is not None and len(self.r_waves_all_pos) > 0:
             return detect_supraventriculars(self.r_waves_all_pos, self.r_waves_all_vals)
         else:
             return np.array([])
 
     def detect_ventriculars(self):
-        if self.r_waves_all_pos:
+        if self.r_waves_all_pos is not None and len(self.r_waves_all_pos) > 0:
             return detect_ventriculars(self.r_waves_all_pos, self.r_waves_all_vals)
         else:
             return np.array([])

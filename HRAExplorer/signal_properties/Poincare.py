@@ -1,5 +1,5 @@
 import numpy as np
-from scipy import mean, var, sqrt, where
+from numpy import mean, var, sqrt, where
 from . helper_functions import  shave_ends
 
 class Poincare:

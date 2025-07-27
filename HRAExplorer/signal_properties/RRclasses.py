@@ -1,5 +1,5 @@
 from re import findall
-from scipy import array, where, cumsum
+from numpy import array, where, cumsum
 from . Poincare import Poincare
 #from . runs import Runs
 #from . spectral import LombScargleSpectrum
