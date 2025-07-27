@@ -433,25 +433,77 @@ def noise_numba(r_waves, time_track, signal, half_template_length=50):
     """
     rr_noise = np.zeros(len(r_waves) - 1)
     
+    # Optimization: Start search from previous position instead of searching entire array
+    last_search_idx = 0
+    
     for idx in range(1, len(r_waves)):
-        # Find peak positions in the signal array
+        # Find peak positions in the signal array - optimized search
         peak_position = -1
         prev_peak_position = -1
         
-        # Manual search for positions (since np.where doesn't work well in numba)
-        for i in range(len(time_track)):
-            if time_track[i] >= r_waves[idx] and peak_position == -1:
-                peak_position = i
-            if time_track[i] >= r_waves[idx - 1] and prev_peak_position == -1:
+        # Search for previous peak position starting from last known position
+        for i in range(last_search_idx, len(time_track)):
+            if time_track[i] >= r_waves[idx - 1]:
                 prev_peak_position = i
+                break
         
-        if peak_position > prev_peak_position + 2 * half_template_length:
+        # Search for current peak position starting from previous peak
+        if prev_peak_position != -1:
+            for i in range(prev_peak_position, len(time_track)):
+                if time_track[i] >= r_waves[idx]:
+                    peak_position = i
+                    last_search_idx = prev_peak_position  # Update starting position for next iteration
+                    break
+        
+        # If we found both positions and there's enough space between them
+        if (peak_position != -1 and prev_peak_position != -1 and 
+            peak_position > prev_peak_position + 2 * half_template_length):
             start_idx = prev_peak_position + half_template_length
             end_idx = peak_position - half_template_length
-            sig_segment = signal[start_idx:end_idx]
-            rr_noise[idx - 1] = np.std(sig_segment)
+            if end_idx > start_idx:
+                sig_segment = signal[start_idx:end_idx]
+                rr_noise[idx - 1] = np.std(sig_segment)
+            else:
+                rr_noise[idx - 1] = 0.0
         else:
             rr_noise[idx - 1] = 0.0
+    
+    return rr_noise
+
+
+@nb.jit(nopython=True)
+def noise_numba_fast(r_waves, time_track, signal, half_template_length=50):
+    """
+    Ultra-fast version assuming time_track is regularly sampled
+    This version assumes time_track[i] corresponds to signal[i] with regular sampling
+    """
+    rr_noise = np.zeros(len(r_waves) - 1)
+    
+    # Calculate sampling rate (time per sample)
+    if len(time_track) > 1:
+        dt = (time_track[-1] - time_track[0]) / (len(time_track) - 1)
+        time_offset = time_track[0]
+        
+        for idx in range(1, len(r_waves)):
+            # Convert time positions to array indices directly
+            prev_idx = int((r_waves[idx - 1] - time_offset) / dt)
+            curr_idx = int((r_waves[idx] - time_offset) / dt)
+            
+            # Ensure indices are within bounds
+            prev_idx = max(0, min(prev_idx, len(signal) - 1))
+            curr_idx = max(0, min(curr_idx, len(signal) - 1))
+            
+            # Calculate noise if there's enough space
+            if curr_idx > prev_idx + 2 * half_template_length:
+                start_idx = prev_idx + half_template_length
+                end_idx = curr_idx - half_template_length
+                if end_idx > start_idx and end_idx <= len(signal):
+                    sig_segment = signal[start_idx:end_idx]
+                    rr_noise[idx - 1] = np.std(sig_segment)
+                else:
+                    rr_noise[idx - 1] = 0.0
+            else:
+                rr_noise[idx - 1] = 0.0
     
     return rr_noise
 
@@ -562,37 +614,155 @@ def noise_profile(r_waves, time, signal, reasonable_rr, n_sample=100, half_templ
     return noise_range[1]
 
 
-def noise(r_waves, time_track, signal, half_template_length=50):
+def noise(r_waves, time_track, signal, half_template_length=50, use_fast=True):
     """
     function for calculating noise between r-peaks
     :param r_waves:
     :param time_track:
     :param signal:
     :param half_template_length:
+    :param use_fast: if True, use ultra-fast version assuming regular sampling
     :return:
     """
-    # Use Numba version for better performance
-    return noise_numba(r_waves, time_track, signal, half_template_length).tolist()
+    # Use fast version for better performance if time_track is regularly sampled
+    if use_fast:
+        return noise_numba_fast(r_waves, time_track, signal, half_template_length).tolist()
+    else:
+        return noise_numba(r_waves, time_track, signal, half_template_length).tolist()
 
 
-def detect_artifacts(r_waves_positions, time_track, signal, rr_filter=(0.3, 1.75)):
+    return artifact_positions
+
+
+@nb.jit(nopython=True)
+def detect_artifacts_numba(r_waves_positions, time_track, signal, rr_filter_min=0.3, rr_filter_max=1.75, 
+                          current_noise_profile=10.0):
+    """
+    Numba-optimized version of detect_artifacts
+    Note: This version requires pre-computed noise profile since noise_profile() 
+    uses functions not supported in nopython mode
+    """
+    reasonable_rr_min = rr_filter_min * 2.0
+    reasonable_rr_max = rr_filter_max * 0.75
+    
+    # Calculate noise using Numba version
+    print("Calculating noise profile with Numba")
+    noise_for_all = noise_numba_fast(r_waves_positions, time_track, signal)
+    print("noise detected")
+    artifact_positions = []
+    
+    for idx in range(1, len(r_waves_positions)):
+        current_rr = r_waves_positions[idx] - r_waves_positions[idx - 1]
+        
+        # Check basic RR interval limits
+        if current_rr < rr_filter_min or current_rr > rr_filter_max:
+            artifact_positions.append(idx)
+        # Check extended RR limits with noise condition
+        elif ((current_rr < reasonable_rr_min or current_rr > reasonable_rr_max) and 
+              noise_for_all[idx - 1] > current_noise_profile * 2):
+            artifact_positions.append(idx)
+        # Check extreme noise condition
+        elif noise_for_all[idx - 1] > 4 * current_noise_profile:
+            artifact_positions.append(idx)
+    
+    return np.array(artifact_positions)
+
+
+@nb.jit(nopython=True)
+def noise_profile_numba(r_waves, time_track, signal, reasonable_rr_min, reasonable_rr_max, 
+                       n_sample=50, half_template_length=50, seed=777):
+    """
+    Numba-optimized version of noise_profile (simplified)
+    This version uses a simpler sampling strategy since np.random.choice isn't fully supported
+    """
+    if len(r_waves) < 6:
+        return -1.0
+    
+    # Simple sampling instead of np.random.choice
+    # Take every nth R-wave to get approximately n_sample points
+    step = max(1, len(r_waves) // n_sample)
+    
+    noise_values = []
+    
+    for i in range(2, len(r_waves), step):
+        if len(noise_values) >= n_sample:
+            break
+            
+        current_rr = r_waves[i] - r_waves[i - 1]
+        
+        # Check if RR interval is reasonable
+        if reasonable_rr_min < current_rr < reasonable_rr_max:
+            # Find positions in signal array
+            peak_position = -1
+            prev_peak_position = -1
+            
+            for j in range(len(time_track)):
+                if time_track[j] >= r_waves[i] and peak_position == -1:
+                    peak_position = j
+                if time_track[j] >= r_waves[i-1] and prev_peak_position == -1:
+                    prev_peak_position = j
+            
+            if (peak_position > prev_peak_position + 2 * half_template_length and 
+                peak_position != -1 and prev_peak_position != -1):
+                start_idx = prev_peak_position + half_template_length
+                end_idx = peak_position - half_template_length
+                if end_idx > start_idx:
+                    sig_segment = signal[start_idx:end_idx]
+                    noise_level = np.std(sig_segment)
+                    noise_values.append(noise_level)
+    
+    if len(noise_values) == 0:
+        return 10.0  # Default fallback value
+    
+    # Simple approximation of 75th percentile * 1.3
+    # Since np.percentile isn't available, use a simpler approach
+    noise_array = np.array(noise_values)
+    sorted_noise = np.sort(noise_array)
+    p75_idx = int(len(sorted_noise) * 0.75)
+    if p75_idx >= len(sorted_noise):
+        p75_idx = len(sorted_noise) - 1
+    
+    return sorted_noise[p75_idx] * 1.3
+
+
+def detect_artifacts(r_waves_positions, time_track, signal, rr_filter=(0.3, 1.75), use_numba=True):
     '''
     this function takes the detected R waves: this is based on the length of the interval and, if the length is a bit
     too big, the noise profile between the R-waves is checked
     '''
+    if use_numba:
+        # Use Numba-optimized version
+        print("Using Numba for artifact detection")
+        reasonable_rr = np.array(rr_filter) * np.array((2, 0.75))
+        print("noise profile calculation")
+        current_noise_profile = noise_profile_numba(r_waves_positions, time_track, signal, 
+                                                   reasonable_rr[0], reasonable_rr[1])
+        if current_noise_profile == -1.0:
+            current_noise_profile = 10.0  # Fallback value
+        print("Detecting artifacts with Numba")
+        return detect_artifacts_numba(r_waves_positions, time_track, signal, 
+                                    rr_filter[0], rr_filter[1], current_noise_profile)
+    else:
+        # Original implementation
+        reasonable_rr = np.array(rr_filter) * np.array((2, 0.75))
+        current_noise_profile = noise_profile(r_waves_positions, time_track, signal, reasonable_rr)
+        noise_for_all = noise(r_waves_positions, time_track, signal)
+        artifact_positions = []
 
-    reasonable_rr = np.array(rr_filter) * np.array((2, 0.75))
-    current_noise_profile = noise_profile(r_waves_positions, time_track, signal, reasonable_rr)
-    noise_for_all = noise(r_waves_positions, time_track, signal)
-    artifact_positions = []
+        for idx in range(1, len(r_waves_positions)):
+            current_rr = r_waves_positions[idx] - r_waves_positions[idx - 1]
+            if np.logical_or(current_rr < rr_filter[0], current_rr > rr_filter[1]):
+                artifact_positions.append(idx)
+            elif np.logical_or(current_rr < reasonable_rr[0], current_rr > reasonable_rr[1]) and noise_for_all[
+                idx - 1] > current_noise_profile * 2:
+                artifact_positions.append(idx)
+            elif noise_for_all[idx - 1] > 4 * current_noise_profile:
+                artifact_positions.append(idx)
+        return artifact_positions
 
-    for idx in range(1, len(r_waves_positions)):
-        current_rr = r_waves_positions[idx] - r_waves_positions[idx - 1]
-        if np.logical_or(current_rr < rr_filter[0], current_rr > rr_filter[1]):
-            artifact_positions.append(idx)
-        elif np.logical_or(current_rr < reasonable_rr[0], current_rr > reasonable_rr[1]) and noise_for_all[
-            idx - 1] > current_noise_profile * 2:
-            artifact_positions.append(idx)
-        elif noise_for_all[idx - 1] > 4 * current_noise_profile:
-            artifact_positions.append(idx)
-    return artifact_positions
+
+def detect_artifacts_wrapper(r_waves_positions, time_track, signal, rr_filter=(0.3, 1.75), use_numba=True):
+    """
+    Wrapper function that can switch between original and Numba implementations
+    """
+    return detect_artifacts(r_waves_positions, time_track, signal, rr_filter, use_numba)
