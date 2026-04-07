@@ -49,7 +49,6 @@ class ECG(Signal):
         self.artifacts_pos, self.artifacts_vals = None, None
         self.rr_filter = (0.3, 1.75)
         self.rr_intervals, self.rr_annotations = None, None
-        self.RRSignal = None
         self.full_data = [dict(), dict()]  # this list holds results for normal [0] and inverted [1] ECG
 
         json_file = self.jsonify()
@@ -99,9 +98,6 @@ class ECG(Signal):
         print("getting RR intervals")
         self.rr_intervals, self.rr_annotations = self.get_rrs()
         print("RR intervals obtained")
-        print("updating Poincare plot")
-        self.update_poincare()
-        print("Poincare plot updated")
         print("updating results dictionary")
         self.update_results_dict()
 
@@ -139,16 +135,6 @@ class ECG(Signal):
             'artifacts_vals')
         self.rr_intervals, self.rr_annotations = self.full_data[idx].get('rr_intervals'), self.full_data[idx].get(
             'rr_annotations')
-        self.update_poincare()
-
-    def update_poincare(self):
-        """
-        this method updates the Poincare plot - it is used in two places, so it has been abstracted out
-        :return:
-        """
-        if self.rr_intervals is not None:
-            self.RRSignal = RRSignal([self.rr_intervals, self.rr_annotations], annotation_filter=(1, 2, 3))
-            self.RRSignal.set_poincare()
 
     def update_results_dict(self):
         """
